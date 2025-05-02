@@ -32,7 +32,13 @@
 </div>
 
 <script>
-    var ws = new WebSocket("ws://localhost:8000/ws");
+    var websocketString = '';
+    if(window.location.hostname === '127.0.0.1'){
+      websocketString = 'ws://localhost:8000/ws';
+    }  else {
+      websocketString = `wss://${window.location.hostname}/ws`
+    } 
+    var ws = new WebSocket(websocketString);
     var sendButton = document.getElementById("sendButton");
     var userInput = document.getElementById("userInput");
     var chatHistory = document.getElementById("chatHistory");

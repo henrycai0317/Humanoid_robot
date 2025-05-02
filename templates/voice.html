@@ -1,0 +1,444 @@
+{% include 'layout.html' %}
+
+<div class="container mt-5">
+  <h3>
+    語音對話 AI 助手
+  </h3>
+
+  <div>
+    <div class="card text-center mt-3">
+      <div class="card-header">
+         語音對話
+      </div>
+      <div class="card-body chat-history" id="chatHistory">
+        <div id="status">準備連接...</div>
+        <div id="transcripts"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="container" id="footer">
+    <div class="input-group mb-3">
+      <button class="btn btn-primary" id="startButton">開始語音對話</button>
+      <button class="btn btn-danger" id="stopButton">結束對話</button>
+      <button class="btn btn-secondary" id="muteButton">靜音</button>
+      <button class="btn btn-warning" id="clearButton">清除歷史</button>
+    </div>
+  </div>
+  
+  <!-- 調試信息區域 -->
+  <div class="mt-3">
+    <div class="card">
+      <div class="card-header">
+        調試信息 <button class="btn btn-sm btn-outline-secondary" id="toggleDebug">顯示/隱藏</button>
+      </div>
+      <div class="card-body" id="debugPanel" style="display: none; max-height: 200px; overflow-y: auto;">
+        <pre id="debugLog"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+// 從 CDN 加載 Ultravox 客戶端
+import { UltravoxSession } from 'https://esm.sh/ultravox-client';
+
+// 全局變量
+let session;
+let isMuted = false;
+let callId = null;
+let conversationHistory = [];
+
+// DOM 元素
+const startButton = document.getElementById('startButton');
+const stopButton = document.getElementById('stopButton');
+const muteButton = document.getElementById('muteButton');
+const clearButton = document.getElementById('clearButton');
+const statusDiv = document.getElementById('status');
+const transcriptsDiv = document.getElementById('transcripts');
+const debugLog = document.getElementById('debugLog');
+const toggleDebugBtn = document.getElementById('toggleDebug');
+const debugPanel = document.getElementById('debugPanel');
+
+// 調試面板切換
+toggleDebugBtn.addEventListener('click', () => {
+  if (debugPanel.style.display === 'none') {
+    debugPanel.style.display = 'block';
+  } else {
+    debugPanel.style.display = 'none';
+  }
+});
+
+// 調試日誌函數
+function debug(message, data) {
+  const timestamp = new Date().toLocaleTimeString();
+  const logEntry = document.createElement('div');
+  logEntry.textContent = `[${timestamp}] ${message} ${data ? JSON.stringify(data) : ''}`;
+  debugLog.appendChild(logEntry);
+  debugLog.scrollTop = debugLog.scrollHeight;
+  
+  console.log(`[DEBUG] ${message}`, data || '');
+}
+
+// 檢查瀏覽器支持
+if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+  statusDiv.textContent = '錯誤: 您的瀏覽器不支持語音功能';
+  startButton.disabled = true;
+  debug('瀏覽器不支持媒體設備');
+}
+
+// 清除對話歷史
+clearButton.addEventListener('click', () => {
+  debug('清除對話歷史');
+  localStorage.removeItem('voiceConversation');
+  conversationHistory = [];
+  transcriptsDiv.innerHTML = '';
+  statusDiv.textContent = '對話歷史已清除';
+});
+
+// 處理開始按鈕點擊
+startButton.addEventListener('click', async () => {
+  statusDiv.textContent = '請求麥克風權限中...';
+  debug('開始語音對話，請求麥克風權限');
+  
+  try {
+    // 先請求麥克風權限
+    await navigator.mediaDevices.getUserMedia({ audio: true });
+    debug('已獲得麥克風權限');
+    
+    statusDiv.textContent = '建立語音連接中...';
+    
+    // 在伺服器上創建通話
+    debug('發送創建通話請求');
+    const response = await fetch('/create-voice-call', {
+      method: 'POST'
+    });
+    
+    const data = await response.json();
+    debug('伺服器回應', data);
+    
+    // 檢查響應中是否有 joinUrl 和 callId
+    let joinUrl;
+    let callIdToUse;
+
+    if (data.joinUrl && data.callId) {
+      // 正常響應
+      joinUrl = data.joinUrl;
+      callIdToUse = data.callId;
+      debug('獲取連接信息成功', { joinUrl, callId: callIdToUse });
+    } else if (data.error) {
+      // 嘗試從 error 字段解析 JSON
+      try {
+        debug('伺服器返回錯誤，嘗試解析', data.error);
+        const errorObj = JSON.parse(data.error);
+        if (errorObj.joinUrl && errorObj.callId) {
+          joinUrl = errorObj.joinUrl;
+          callIdToUse = errorObj.callId;
+          debug('從錯誤中解析出連接信息', { joinUrl, callId: callIdToUse });
+        } else {
+          statusDiv.textContent = `錯誤: ${data.error}`;
+          debug('無法從錯誤中獲取連接信息');
+          return;
+        }
+      } catch (e) {
+        // 如果 error 不是 JSON 格式
+        statusDiv.textContent = `錯誤: ${data.error}`;
+        debug('錯誤不是 JSON 格式', e);
+        return;
+      }
+    } else {
+      statusDiv.textContent = '無法獲取連接信息';
+      debug('回應中沒有所需的字段');
+      return;
+    }
+    
+    callId = callIdToUse;
+    debug(`設置 callId = ${callId}`);
+    
+    // 初始化 Ultravox 會話
+    session = new UltravoxSession();
+    debug('Ultravox 會話已初始化');
+    
+    // 添加狀態事件監聽器
+    session.addEventListener('status', (event) => {
+      const status = session.status;
+      statusDiv.textContent = `狀態: ${status}`;
+      debug('會話狀態變更', status);
+      
+      if (status === 'connected') {
+        startButton.disabled = true;
+        stopButton.disabled = false;
+        debug('連接成功，更新按鈕狀態');
+      } else if (status === 'disconnected') {
+        startButton.disabled = false;
+        stopButton.disabled = true;
+        debug('已斷開連接，更新按鈕狀態');
+      }
+    });
+    
+    // 添加轉錄事件監聽器
+    session.addEventListener('transcripts', handleTranscripts);
+    
+    // 加入通話
+    debug('嘗試加入通話', { joinUrl });
+    session.joinCall(joinUrl);
+    
+  } catch (error) {
+    statusDiv.textContent = `錯誤: ${error.message}`;
+    debug('語音連接錯誤', error);
+    console.error('語音連接錯誤:', error);
+  }
+});
+
+// 處理轉錄事件的函數
+function handleTranscripts(event) {
+  debug('收到轉錄事件', { type: event.type });
+  
+  // 確保有轉錄內容
+  if (!session || !session.transcripts || session.transcripts.length === 0) {
+    debug('沒有轉錄內容可處理');
+    return;
+  }
+  
+  // 清空現有內容，重新顯示所有轉錄
+  transcriptsDiv.innerHTML = '';
+  debug(`處理 ${session.transcripts.length} 條轉錄`);
+  
+  // 用於跟踪已經顯示的轉錄
+  const displayedIds = new Set();
+  
+  // 處理每一條轉錄
+  session.transcripts.forEach((transcript, index) => {
+    // 創建唯一 ID
+    const transcriptId = `${transcript.speaker}-${transcript.id || index}`;
+    
+    // 防止顯示重複內容
+    if (displayedIds.has(transcriptId)) {
+      debug(`跳過重複的轉錄 ${transcriptId}`);
+      return;
+    }
+    
+    displayedIds.add(transcriptId);
+    
+    // 創建新的消息元素
+    const messageElement = document.createElement('div');
+    messageElement.className = transcript.speaker === 'agent' ? 
+      'chat-message ai-response' : 'chat-message user-input';
+    messageElement.innerHTML = `<strong>${transcript.speaker === 'agent' ? 'AI' : '您'}:</strong> ${transcript.text}`;
+    transcriptsDiv.appendChild(messageElement);
+    
+    debug(`顯示轉錄 #${index}`, { speaker: transcript.speaker, complete: transcript.complete });
+    
+    // 如果轉錄完成，添加到對話歷史
+    if (transcript.complete) {
+      // 檢查歷史記錄中是否已存在此 ID
+      const existingIndex = conversationHistory.findIndex(item => 
+        item.id === transcriptId);
+      
+      if (existingIndex >= 0) {
+        // 更新現有項
+        conversationHistory[existingIndex] = {
+          id: transcriptId,
+          speaker: transcript.speaker,
+          text: transcript.text,
+          complete: true
+        };
+      } else {
+        // 添加新項
+        conversationHistory.push({
+          id: transcriptId,
+          speaker: transcript.speaker,
+          text: transcript.text,
+          complete: true
+        });
+      }
+      
+      // 保存到本地存儲
+      localStorage.setItem('voiceConversation', JSON.stringify(conversationHistory));
+      debug(`已保存完成的轉錄到歷史`, { id: transcriptId });
+    }
+  });
+  
+  // 滾動到底部
+  transcriptsDiv.scrollTop = transcriptsDiv.scrollHeight;
+}
+
+// 處理結束按鈕點擊
+stopButton.addEventListener('click', async () => {
+  statusDiv.textContent = '嘗試結束通話...';
+  debug('結束通話按鈕被點擊');
+  
+  // 記錄當前會話狀態
+  debug('當前會話狀態', {
+    sessionExists: !!session,
+    callIdExists: !!callId,
+    callIdValue: callId,
+    buttonDisabled: stopButton.disabled
+  });
+  
+  if (!session) {
+    debug('沒有活躍會話可以結束');
+    statusDiv.textContent = '沒有活躍的通話可以結束';
+    startButton.disabled = false;
+    stopButton.disabled = true;
+    return;
+  }
+  
+  try {
+    // 分步驟執行，記錄每個步驟
+    debug('1. 開始結束通話流程');
+    
+    // 禁用按鈕，避免重複點擊
+    stopButton.disabled = true;
+    debug('2. 已禁用結束按鈕');
+    
+    // 嘗試退出通話
+    try {
+      debug('3. 準備呼叫 session.leaveCall()');
+      const oldStatus = session.status;
+      session.leaveCall();
+      debug('4. session.leaveCall() 已執行', { oldStatus, newStatus: session.status });
+    } catch (leaveError) {
+      debug('離開通話時出錯', leaveError);
+    }
+    
+    // 通知伺服器結束通話
+    if (callId) {
+      debug(`5. 準備向伺服器發送結束請求：/end-voice-call/${callId}`);
+      
+      try {
+        const response = await fetch(`/end-voice-call/${callId}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        debug('6. 伺服器響應狀態碼', response.status);
+        
+        // 檢查響應
+        if (!response.ok) {
+          debug('伺服器響應不成功', { status: response.status });
+        }
+        
+        try {
+          const data = await response.json();
+          debug('7. 解析響應數據', data);
+          
+          if (data.error) {
+            debug('伺服器返回錯誤', data.error);
+            statusDiv.textContent = `結束通話時出錯: ${data.error}`;
+          } else {
+            debug('通話已成功結束');
+            statusDiv.textContent = '通話已結束';
+          }
+        } catch (jsonError) {
+          debug('解析響應 JSON 時出錯', { error: jsonError.toString() });
+        }
+      } catch (fetchError) {
+        debug('發送 fetch 請求時出錯', fetchError);
+        statusDiv.textContent = `發送結束請求時出錯: ${fetchError.message}`;
+      }
+    } else {
+      debug('無法結束通話：callId 為空');
+    }
+
+    // 即使出錯也重置 session
+    debug('8. 移除事件監聽器並清空 session');
+    if (session) {
+      try {
+        session.removeEventListener('transcripts', handleTranscripts);
+      } catch (e) {
+        debug('移除事件監聽器時出錯', e);
+      }
+      session = null;
+    }
+    
+    // 重置按鈕狀態
+    debug('9. 重置按鈕狀態');
+    startButton.disabled = false;
+    stopButton.disabled = true;
+    
+    debug('10. 結束通話流程完成');
+    
+  } catch (error) {
+    debug('結束通話流程中出現未捕獲錯誤', error);
+    console.error('結束通話流程中出現未捕獲錯誤:', error);
+    
+    // 確保重置狀態
+    if (session) {
+      try {
+        session = null;
+      } catch (e) {}
+    }
+    
+    startButton.disabled = false;
+    stopButton.disabled = true;
+    statusDiv.textContent = '通話已強制結束';
+  }
+});
+
+// 處理靜音按鈕點擊
+muteButton.addEventListener('click', () => {
+  if (!session) {
+    debug('無法靜音：沒有活躍會話');
+    return;
+  }
+  
+  if (isMuted) {
+    session.unmuteMic();
+    muteButton.textContent = '靜音';
+    debug('麥克風已取消靜音');
+  } else {
+    session.muteMic();
+    muteButton.textContent = '取消靜音';
+    debug('麥克風已靜音');
+  }
+  
+  isMuted = !isMuted;
+});
+
+// 頁面載入時恢復之前的對話記錄
+window.addEventListener('load', () => {
+  debug('頁面載入，嘗試恢復對話歷史');
+  const savedConversation = localStorage.getItem('voiceConversation');
+  
+  if (savedConversation) {
+    try {
+      const parsedConversation = JSON.parse(savedConversation);
+      debug(`找到已保存的對話，共 ${parsedConversation.length} 條記錄`);
+      
+      conversationHistory = parsedConversation;
+      
+      // 顯示之前的對話
+      parsedConversation.forEach(entry => {
+        // 如果之前的記錄沒有 ID，則生成一個
+        const messageId = entry.id || `${entry.speaker}-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
+        
+        // 檢查是否已存在相同 ID 的元素
+        if (!document.getElementById(messageId)) {
+          const messageDiv = document.createElement('div');
+          messageDiv.id = messageId;
+          messageDiv.className = entry.speaker === 'agent' ? 
+            'chat-message ai-response' : 'chat-message user-input';
+          messageDiv.innerHTML = `<strong>${entry.speaker === 'agent' ? 'AI' : '您'}:</strong> ${entry.text}`;
+          transcriptsDiv.appendChild(messageDiv);
+          
+          debug(`恢復歷史對話: ${messageId}`, {
+            speaker: entry.speaker,
+            textLength: entry.text.length
+          });
+        }
+      });
+      
+      // 滾動到底部
+      transcriptsDiv.scrollTop = transcriptsDiv.scrollHeight;
+    } catch (e) {
+      debug('無法恢復先前的對話', e);
+      console.error('無法恢復先前的對話:', e);
+    }
+  } else {
+    debug('未找到已保存的對話歷史');
+  }
+});
+</script>
