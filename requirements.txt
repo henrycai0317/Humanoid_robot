@@ -28,6 +28,6 @@ typing_extensions==4.13.0
 uvicorn==0.34.0
 ultravox-client==0.0.9
 websocket==0.2.1
-websockets==15.0.1
+websockets==14.1
 zope.event==5.0
 zope.interface==7.2
