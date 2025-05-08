@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 import asyncio
 import ultravox_client as uv  # 導入 Ultravox 客戶端
 
-
 load_dotenv()
 
 openai = OpenAI(
@@ -20,6 +19,8 @@ app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
 chat_responses = []
+
+# 初始化聊天記錄
 chat_log = [{'role':'system',
              'content':'You tell jokes.'
              }]

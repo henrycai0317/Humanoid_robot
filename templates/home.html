@@ -38,6 +38,8 @@
     }  else {
       websocketString = `wss://${window.location.hostname}/ws`
     } 
+    
+    // Create a new WebSocket connection
     var ws = new WebSocket(websocketString);
     var sendButton = document.getElementById("sendButton");
     var userInput = document.getElementById("userInput");
